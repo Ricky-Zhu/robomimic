@@ -17,21 +17,22 @@ import robomimic.utils.log_utils as LogUtils
 
 class SequenceDataset(torch.utils.data.Dataset):
     def __init__(
-        self,
-        hdf5_path,
-        obs_keys,
-        dataset_keys,
-        frame_stack=1,
-        seq_length=1,
-        pad_frame_stack=True,
-        pad_seq_length=True,
-        get_pad_mask=False,
-        goal_mode=None,
-        hdf5_cache_mode=None,
-        hdf5_use_swmr=True,
-        hdf5_normalize_obs=False,
-        filter_by_attribute=None,
-        load_next_obs=True,
+            self,
+            hdf5_path,
+            obs_keys,
+            dataset_keys,
+            frame_stack=1,
+            seq_length=1,
+            pad_frame_stack=True,
+            pad_seq_length=True,
+            get_pad_mask=False,
+            goal_mode=None,
+            hdf5_cache_mode=None,
+            hdf5_use_swmr=True,
+            hdf5_normalize_obs=False,
+            filter_by_attribute=None,
+            load_next_obs=True,
+            load_specific_num=None,
     ):
         """
         Dataset class for fetching sequences of experience.
@@ -86,6 +87,7 @@ class SequenceDataset(torch.utils.data.Dataset):
         self.hdf5_use_swmr = hdf5_use_swmr
         self.hdf5_normalize_obs = hdf5_normalize_obs
         self._hdf5_file = None
+        self.load_specific_num = load_specific_num
 
         assert hdf5_cache_mode in ["all", "low_dim", None]
         self.hdf5_cache_mode = hdf5_cache_mode
@@ -167,13 +169,16 @@ class SequenceDataset(torch.utils.data.Dataset):
         if demos is not None:
             self.demos = demos
         elif filter_by_attribute is not None:
-            self.demos = [elem.decode("utf-8") for elem in np.array(self.hdf5_file["mask/{}".format(filter_by_attribute)][:])]
+            self.demos = [elem.decode("utf-8") for elem in
+                          np.array(self.hdf5_file["mask/{}".format(filter_by_attribute)][:])]
         else:
             self.demos = list(self.hdf5_file["data"].keys())
 
         # sort demo keys
         inds = np.argsort([int(elem[5:]) for elem in self.demos])
         self.demos = [self.demos[i] for i in inds]
+        if self.load_specific_num is not None:
+            self.demos = self.demos[:self.load_specific_num]
 
         self.n_demos = len(self.demos)
 
@@ -278,6 +283,7 @@ class SequenceDataset(torch.utils.data.Dataset):
             all_data (dict): dictionary of loaded data.
         """
         all_data = dict()
+
         print("SequenceDataset: loading dataset into memory...")
         for ep in LogUtils.custom_tqdm(demo_list):
             all_data[ep] = {}
@@ -286,7 +292,8 @@ class SequenceDataset(torch.utils.data.Dataset):
             # get obs
             all_data[ep]["obs"] = {k: hdf5_file["data/{}/obs/{}".format(ep, k)][()].astype('float32') for k in obs_keys}
             if load_next_obs:
-                all_data[ep]["next_obs"] = {k: hdf5_file["data/{}/next_obs/{}".format(ep, k)][()].astype('float32') for k in obs_keys}
+                all_data[ep]["next_obs"] = {k: hdf5_file["data/{}/next_obs/{}".format(ep, k)][()].astype('float32') for
+                                            k in obs_keys}
             # get other dataset keys
             for k in dataset_keys:
                 if k in hdf5_file["data/{}".format(ep)]:
@@ -304,15 +311,17 @@ class SequenceDataset(torch.utils.data.Dataset):
         Computes a dataset-wide mean and standard deviation for the observations 
         (per dimension and per obs key) and returns it.
         """
+
         def _compute_traj_stats(traj_obs_dict):
             """
             Helper function to compute statistics over a single trajectory of observations.
             """
-            traj_stats = { k : {} for k in traj_obs_dict }
+            traj_stats = {k: {} for k in traj_obs_dict}
             for k in traj_obs_dict:
                 traj_stats[k]["n"] = traj_obs_dict[k].shape[0]
-                traj_stats[k]["mean"] = traj_obs_dict[k].mean(axis=0, keepdims=True) # [1, ...]
-                traj_stats[k]["sqdiff"] = ((traj_obs_dict[k] - traj_stats[k]["mean"]) ** 2).sum(axis=0, keepdims=True) # [1, ...]
+                traj_stats[k]["mean"] = traj_obs_dict[k].mean(axis=0, keepdims=True)  # [1, ...]
+                traj_stats[k]["sqdiff"] = ((traj_obs_dict[k] - traj_stats[k]["mean"]) ** 2).sum(axis=0,
+                                                                                                keepdims=True)  # [1, ...]
             return traj_stats
 
         def _aggregate_traj_stats(traj_stats_a, traj_stats_b):
@@ -345,7 +354,7 @@ class SequenceDataset(torch.utils.data.Dataset):
             traj_stats = _compute_traj_stats(obs_traj)
             merged_stats = _aggregate_traj_stats(merged_stats, traj_stats)
 
-        obs_normalization_stats = { k : {} for k in merged_stats }
+        obs_normalization_stats = {k: {} for k in merged_stats}
         for k in merged_stats:
             # note we add a small tolerance of 1e-3 for std
             obs_normalization_stats[k]["mean"] = merged_stats[k]["mean"]
@@ -378,7 +387,7 @@ class SequenceDataset(torch.utils.data.Dataset):
             # if key is an observation, it may not be in memory
             if '/' in key:
                 key1, key2 = key.split('/')
-                assert(key1 in ['obs', 'next_obs'])
+                assert (key1 in ['obs', 'next_obs'])
                 if key2 not in self.obs_keys_in_memory:
                     key_should_be_in_memory = False
 
@@ -386,7 +395,7 @@ class SequenceDataset(torch.utils.data.Dataset):
             # read cache
             if '/' in key:
                 key1, key2 = key.split('/')
-                assert(key1 in ['obs', 'next_obs'])
+                assert (key1 in ['obs', 'next_obs'])
                 ret = self.hdf5_cache[ep][key1][key2]
             else:
                 ret = self.hdf5_cache[ep][key]
@@ -454,7 +463,8 @@ class SequenceDataset(torch.utils.data.Dataset):
                 prefix="next_obs"
             )
             if self.hdf5_normalize_obs:
-                meta["next_obs"] = ObsUtils.normalize_obs(meta["next_obs"], obs_normalization_stats=self.obs_normalization_stats)
+                meta["next_obs"] = ObsUtils.normalize_obs(meta["next_obs"],
+                                                          obs_normalization_stats=self.obs_normalization_stats)
 
         if goal_index is not None:
             goal = self.get_obs_sequence_from_demo(
@@ -517,7 +527,8 @@ class SequenceDataset(torch.utils.data.Dataset):
 
         return seq, pad_mask
 
-    def get_obs_sequence_from_demo(self, demo_id, index_in_demo, keys, num_frames_to_stack=0, seq_length=1, prefix="obs"):
+    def get_obs_sequence_from_demo(self, demo_id, index_in_demo, keys, num_frames_to_stack=0, seq_length=1,
+                                   prefix="obs"):
         """
         Extract a (sub)sequence of observation items from a demo given the @keys of the items.
 
